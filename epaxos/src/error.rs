@@ -13,3 +13,9 @@ pub enum ExecuteError {
     #[error("meet io related error")]
     IoError(#[from] io::Error),
 }
+
+#[derive(Error, Debug)]
+pub enum RpcError {
+    #[error("meet io related error")]
+    IoError(#[from] io::Error),
+}
