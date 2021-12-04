@@ -1,6 +1,5 @@
 use std::ops::Index;
 
-use bincode::Config;
 use yaml_rust::YamlLoader;
 
 #[derive(Clone)]
@@ -11,14 +10,12 @@ pub struct Configure {
 }
 
 impl Configure {
-    // This should only be used in test
-    pub(crate) fn new(peer_cnt: usize, peer: Vec<String>, index: usize) -> Self{
+    pub fn new(peer_cnt: usize, peer: Vec<String>, index: usize) -> Self {
         Self {
             peer_cnt,
             peer,
             index,
         }
-
     }
 }
 
@@ -60,7 +57,7 @@ impl ConfigureSrc for YamlConfigureSrc {
         // TODO: put string to const
         let peer_cnt = yaml["peer_cnt"].as_i64().unwrap() as usize;
 
-        let mut peer = yaml["peer"]
+        let peer = yaml["peer"]
             .as_vec()
             .unwrap()
             .iter()

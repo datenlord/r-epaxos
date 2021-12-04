@@ -1,7 +1,11 @@
 use std::{ops::DerefMut, sync::Arc};
 
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::Mutex};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::Mutex,
+};
 
 pub(crate) async fn send_message<M>(conn: &mut TcpStream, message: &M)
 where
@@ -68,4 +72,3 @@ async fn read_from_stream(stream: &mut TcpStream, buf: &mut [u8]) {
         has_read += read_size;
     }
 }
-

@@ -3,19 +3,18 @@ use crate::{
     error::RpcError,
     message::{Accept, Commit, Message, PreAccept, PreAcceptOk, PreAcceptReply, Propose},
     types::{
-        Ballot, Command, Instance, InstanceId, InstanceStatus, LeaderBook, LeaderId,
-        LocalInstanceId, Replica, ReplicaId,
+        Ballot, Command, Instance, InstanceId, InstanceStatus, LeaderBook, LeaderId, Replica,
+        ReplicaId,
     },
     util,
 };
 use futures::stream::{self, StreamExt};
-use log::{debug, trace};
+use log::trace;
 use serde::{de::DeserializeOwned, Serialize};
-use std::{borrow::BorrowMut, ops::Deref, sync::Arc};
+use std::sync::Arc;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, MutexGuard, RwLock},
+    sync::{Mutex, RwLock},
     task::JoinHandle,
 };
 
@@ -23,7 +22,6 @@ pub struct Server<C>
 where
     C: Command,
 {
-    inner: Arc<InnerServer<C>>,
     rpc_server: RpcServer<C>,
 }
 
@@ -31,13 +29,13 @@ impl<C> Server<C>
 where
     C: Command + std::fmt::Debug + Clone + Send + Sync + Serialize + DeserializeOwned + 'static,
 {
-    pub(crate) async fn new(conf: Configure) -> Self {
+    pub async fn new(conf: Configure) -> Self {
         let inner = Arc::new(InnerServer::new(conf));
         let rpc_server = RpcServer::new(inner.conf(), inner.clone()).await;
-        Self { inner, rpc_server }
+        Self { rpc_server }
     }
 
-    pub(crate) async fn run(&self) {
+    pub async fn run(&self) {
         let _ = self.rpc_server.serve().await;
     }
 }
@@ -79,13 +77,15 @@ where
             Message::PreAccept(pa) => self.handle_preaccept(pa).await,
             Message::PreAcceptReply(par) => self.handle_preaccept_reply(par).await,
             Message::PreAcceptOk(pao) => self.handle_preaccept_ok(pao).await,
-            Message::Accept(_) => todo!(),
+            Message::Accept(a) => self.handle_accept(a).await,
             Message::AcceptReply(_) => todo!(),
             Message::Commit(cm) => self.handle_commit(cm).await,
             Message::CommitShort(_) => todo!(),
             Message::Propose(p) => self.handle_propose(p).await,
         }
     }
+
+    async fn handle_accept(&self, _a: Accept) {}
 
     async fn handle_commit(&self, cm: Commit<C>) {
         trace!("handle commit");
@@ -108,7 +108,6 @@ where
                 ins.status = InstanceStatus::Committed;
             }
             None => {
-                drop(ins);
                 let new_instance = Arc::new(RwLock::new(Instance {
                     id: cm.instance_id.inner,
                     seq: cm.seq,
@@ -118,8 +117,9 @@ where
                     status: InstanceStatus::Committed,
                     lb: LeaderBook::new(),
                 }));
-                r.instance_space[*cm.instance_id.replica].insert(*cm.instance_id.inner, new_instance.clone());
-                r.update_conflict(&cm.cmds, new_instance);
+                r.instance_space[*cm.instance_id.replica]
+                    .insert(*cm.instance_id.inner, new_instance.clone());
+                r.update_conflict(&cm.cmds, new_instance).await;
             }
         }
 
@@ -312,7 +312,7 @@ where
                         }
                     }
                 }
-                return false;
+                false
             })
             .filter(|a| *a)
             .count()
@@ -524,19 +524,5 @@ where
                 }
             });
         }
-    }
-}
-
-async fn read_from_stream(stream: &mut TcpStream, buf: &mut [u8]) {
-    let expect_len = buf.len();
-    let mut has_read: usize = 0;
-    while has_read != expect_len {
-        let read_size = stream
-            .read(&mut buf[has_read..])
-            .await
-            .map_err(|e| panic!("tpc link should read {} bytes message, {}", expect_len, e))
-            .unwrap();
-
-        has_read += read_size;
     }
 }

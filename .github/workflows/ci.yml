@@ -1,0 +1,62 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  RUST_TOOLCHAIN_VERSION: stable
+  RUST_TOOLCHAIN_COMPONENET: clippy, rustfmt, rustc, cargo, rust-std
+
+jobs:
+  fmt:
+    name: Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: install rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          override: true
+          components: ${{ env.RUST_TOOLCHAIN_COMPONENET }}
+      - name: code format check
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: install rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          override: true
+          components: ${{ env.RUST_TOOLCHAIN_COMPONENET }}
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-features --all-targets -- -D warnings
+
+  ci:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    env:
+      RUST_LOG: TRACE
+    steps:
+      - uses: actions/checkout@v2
+      - name: install rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          override: true
+          components: ${{ env.RUST_TOOLCHAIN_COMPONENET }}
+      - uses: actions-rs/cargo@v1
+        with:
+          command: run

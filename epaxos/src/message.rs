@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::types::{Ballot, Command, InstanceId, LeaderId, LocalInstanceId, Seq};
 use serde::{Deserialize, Serialize};
 

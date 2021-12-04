@@ -1,19 +1,20 @@
-mod client;
-mod config;
-mod error;
-mod message;
-mod server;
+pub mod client;
+pub mod config;
+pub mod error;
+pub mod message;
+pub mod server;
 mod types;
 mod util;
+
+use std::time::Duration;
 
 use client::{RpcClient, TcpRpcClient};
 use config::Configure;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use server::Server;
-use tokio::{io, task::JoinHandle};
+use tokio::{io, time::timeout};
 use types::Command;
-use env_logger;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TestCommandOp {
@@ -58,28 +59,30 @@ async fn main() -> io::Result<()> {
         server.push(Server::<TestCommand>::new(c).await);
     }
 
-    let handles : Vec<JoinHandle<()>> = server
+    let handles: Vec<_> = server
         .into_iter()
         .map(|s| {
-            tokio::spawn(async move {
+            tokio::spawn(timeout(Duration::from_secs(10), async move {
                 s.run().await;
-            })
+            }))
         })
         .collect();
 
     debug!("spawn servers");
 
     let mut client = TcpRpcClient::<TestCommand>::new(Configure::new(3, peer, 0), 0).await;
-    client.propose(vec![TestCommand {
-        key: "k1".to_owned(),
-        value: Some("v1".to_owned()),
-        op: TestCommandOp::Write,
-    }]).await;
+    client
+        .propose(vec![TestCommand {
+            key: "k1".to_owned(),
+            value: Some("v1".to_owned()),
+            op: TestCommandOp::Write,
+        }])
+        .await;
 
     debug!("after client propose");
     // The server will never end until someone kills is
     for h in handles {
-        h.await?;
+        let _ = h.await?;
     }
 
     Ok(())

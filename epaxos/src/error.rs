@@ -1,10 +1,8 @@
-use thiserror::Error;
 use std::io;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum CommitError {
-
-}
+pub enum CommitError {}
 
 #[derive(Error, Debug)]
 pub enum ExecuteError {
