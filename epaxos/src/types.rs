@@ -1,13 +1,12 @@
-use std::{
-    borrow::Borrow, cell::RefCell, cmp::max, collections::HashMap, fs::create_dir_all, hash::Hash,
-    iter, rc::Rc, slice::SliceIndex, sync::Arc,
-};
+use std::{collections::HashMap, hash::Hash, iter, sync::Arc};
 
 use crate::error::ExecuteError;
 use itertools::Itertools;
 use pro_macro::FromInner;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, RwLockWriteGuard};
+
+type Conflict<C> = Vec<HashMap<<C as Command>::K, Arc<RwLock<Instance<C>>>>>;
 
 pub struct Replica<C>
 where
@@ -19,7 +18,7 @@ where
     /// Current max instance id for each replica, init values are 0s
     pub(crate) cur_instance: Vec<LocalInstanceId>,
     pub(crate) commited_upto: Vec<Option<LocalInstanceId>>,
-    pub(crate) conflict: Vec<HashMap<C::K, Arc<RwLock<Instance<C>>>>>,
+    pub(crate) conflict: Conflict<C>,
     pub(crate) max_seq: Seq,
 }
 
@@ -66,46 +65,43 @@ where
 
     pub(crate) fn inc_local_cur_instance(&mut self) -> &LocalInstanceId {
         let mut ins_id = self.cur_instance.get_mut(*self.id).unwrap();
-        ins_id.0 = ins_id.0 + 1;
+        ins_id.0 += 1;
         ins_id
     }
 
     // it's not a pure function
     pub(crate) fn merge_seq_deps(
         &self,
-        ins: &mut RwLockWriteGuard::<Instance<C>>,
+        ins: &mut RwLockWriteGuard<Instance<C>>,
         new_seq: &Seq,
-        new_deps: &Vec<Option<LocalInstanceId>>,
+        new_deps: &[Option<LocalInstanceId>],
     ) -> bool {
         let mut equal = true;
         if &ins.seq != new_seq {
             equal = false;
-            if new_seq > &ins.seq{
+            if new_seq > &ins.seq {
                 ins.seq = *new_seq;
             }
         }
 
-        ins.deps
-            .iter_mut()
-            .zip(new_deps.iter())
-            .for_each(|(o, n)| {
-                if o != n {
-                    equal = false;
-                    if o.is_none() || (n.is_some() && o.as_ref().unwrap() < n.as_ref().unwrap()) {
-                        *o = *n;
-                    }
+        ins.deps.iter_mut().zip(new_deps.iter()).for_each(|(o, n)| {
+            if o != n {
+                equal = false;
+                if o.is_none() || (n.is_some() && o.as_ref().unwrap() < n.as_ref().unwrap()) {
+                    *o = *n;
                 }
-            });
+            }
+        });
         equal
     }
 
-    pub(crate) async fn get_seq_deps(&self, cmds: &Vec<C>) -> (Seq, Vec<Option<LocalInstanceId>>) {
+    pub(crate) async fn get_seq_deps(&self, cmds: &[C]) -> (Seq, Vec<Option<LocalInstanceId>>) {
         let mut new_seq = Seq(0);
         let mut deps: Vec<Option<LocalInstanceId>> =
             iter::repeat_with(|| None).take(self.peer_cnt).collect();
         for (r_id, command) in (0..self.peer_cnt).cartesian_product(cmds.iter()) {
             if r_id != *self.id {
-                for ins in self.conflict[r_id].get(command.key()) {
+                if let Some(ins) = self.conflict[r_id].get(command.key()) {
                     let conflict_ins = ins.read().await;
                     // update deps
                     deps.insert(
@@ -137,14 +133,14 @@ where
         &self,
         mut seq: Seq,
         mut deps: Vec<Option<LocalInstanceId>>,
-        cmds: &Vec<C>,
+        cmds: &[C],
     ) -> (Seq, Vec<Option<LocalInstanceId>>, bool) {
         let mut changed = false;
         for (r_id, command) in (0..self.peer_cnt).cartesian_product(cmds.iter()) {
             if r_id != *self.id {
-                for ins in self.conflict[r_id].get(command.key()) {
+                if let Some(ins) = self.conflict[r_id].get(command.key()) {
                     let conflict_ins = ins.read().await;
-                    if deps[r_id].is_some() && deps[r_id].map(|l| l).unwrap() < conflict_ins.id {
+                    if deps[r_id].is_some() && deps[r_id].unwrap() < conflict_ins.id {
                         changed = true;
                         // update deps
                         deps.insert(
@@ -172,11 +168,7 @@ where
         (seq, deps, changed)
     }
 
-    pub(crate) async fn update_conflict(
-        &mut self,
-        cmds: &Vec<C>,
-        new_inst: Arc<RwLock<Instance<C>>>,
-    ) {
+    pub(crate) async fn update_conflict(&mut self, cmds: &[C], new_inst: Arc<RwLock<Instance<C>>>) {
         for c in cmds {
             let new_inst = match self.conflict[*self.id].get(c.key()) {
                 None => Some(new_inst.clone()),

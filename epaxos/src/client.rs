@@ -1,10 +1,15 @@
 use std::{fmt::Debug, marker::PhantomData};
 
-use crate::{config::Configure, message::{self, Message, Propose}, types::Command, util};
+use crate::{
+    config::Configure,
+    message::{Message, Propose},
+    types::Command,
+    util,
+};
 use async_trait::async_trait;
-use log::{debug, trace};
+use log::trace;
 use serde::Serialize;
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::net::TcpStream;
 
 #[async_trait]
 pub trait RpcClient<C>
@@ -19,6 +24,8 @@ pub struct TcpRpcClient<C>
 where
     C: Command,
 {
+    #[allow(dead_code)]
+    // this filed will be used in the membership change
     conf: Configure,
     stream: TcpStream,
     phantom: PhantomData<C>,
@@ -36,8 +43,9 @@ where
             .unwrap();
         let stream = TcpStream::connect(conn_str)
             .await
-            .map_err(|e| panic!("connec to {} epaxos peer failed", id)).unwrap();
-        
+            .map_err(|_e| panic!("connec to {} epaxos peer failed", id))
+            .unwrap();
+
         Self {
             conf,
             stream,
