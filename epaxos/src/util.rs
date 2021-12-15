@@ -7,6 +7,8 @@ use tokio::{
     sync::Mutex,
 };
 
+use crate::types::{Command, SharedInstance};
+
 pub(crate) async fn send_message<M>(conn: &mut TcpStream, message: &M)
 where
     M: Serialize,
@@ -70,5 +72,18 @@ async fn read_from_stream(stream: &mut TcpStream, buf: &mut [u8]) {
             .unwrap();
 
         has_read += read_size;
+    }
+}
+
+pub(crate) async fn instance_exist<C>(ins: &Option<SharedInstance<C>>) -> bool
+where
+    C: Command + Clone,
+{
+    if ins.is_some() {
+        let ins = ins.as_ref().unwrap();
+        let ins_read = ins.get_instance_read().await;
+        ins_read.is_some()
+    } else {
+        false
     }
 }
