@@ -1,6 +1,7 @@
 pub mod client;
 pub mod config;
 pub mod error;
+mod execute;
 pub mod message;
 pub mod server;
 mod types;
@@ -10,11 +11,11 @@ use std::time::Duration;
 
 use client::{RpcClient, TcpRpcClient};
 use config::Configure;
-use log::debug;
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use server::Server;
 use tokio::{io, time::timeout};
-use types::Command;
+use types::{Command, CommandExecutor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TestCommandOp {
@@ -37,11 +38,22 @@ impl Command for TestCommand {
         &self.key
     }
 
-    async fn execute<F>(&self, f: F) -> Result<(), error::ExecuteError>
+    async fn execute<E>(&self, e: &E) -> Result<(), error::ExecuteError>
     where
-        F: Fn(&Self) -> Result<(), error::ExecuteError> + Send,
+        E: CommandExecutor<Self> + Sync + Send,
     {
-        f(self)
+        <E as CommandExecutor<Self>>::execute(e, self).await
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TestCommandExecutor {}
+
+#[async_trait::async_trait]
+impl CommandExecutor<TestCommand> for TestCommandExecutor {
+    async fn execute(&self, cmd: &TestCommand) -> Result<(), error::ExecuteError> {
+        info!("execute command {:?}", cmd);
+        Ok(())
     }
 }
 
@@ -54,9 +66,11 @@ async fn main() -> io::Result<()> {
         "localhost:9002".to_owned(),
     ];
 
+    let cmd_exe = TestCommandExecutor {};
+
     let mut server = Vec::with_capacity(3);
     for c in (0..3).map(|id| Configure::new(3, peer.to_vec(), id)) {
-        server.push(Server::<TestCommand>::new(c).await);
+        server.push(Server::<TestCommand, TestCommandExecutor>::new(c, cmd_exe).await);
     }
 
     let handles: Vec<_> = server

@@ -41,9 +41,9 @@ pub(crate) struct Accept {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct AcceptReply {
-    instance_id: InstanceId,
-    ok: bool,
-    ballot: Ballot,
+    pub(crate) instance_id: InstanceId,
+    pub(crate) ok: bool,
+    pub(crate) ballot: Ballot,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

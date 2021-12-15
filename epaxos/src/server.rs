@@ -1,16 +1,19 @@
 use crate::{
     config::Configure,
     error::RpcError,
-    message::{Accept, Commit, Message, PreAccept, PreAcceptOk, PreAcceptReply, Propose},
-    types::{
-        Ballot, Command, Instance, InstanceId, InstanceStatus, LeaderBook, LeaderId, Replica,
-        ReplicaId,
+    message::{
+        Accept, AcceptReply, Commit, Message, PreAccept, PreAcceptOk, PreAcceptReply, Propose,
     },
-    util,
+    types::{
+        Ballot, Command, CommandExecutor, Instance, InstanceId, InstanceStatus, LeaderBook,
+        LeaderId, Replica, ReplicaId, SharedInstance,
+    },
+    util::{self, instance_exist},
 };
 use futures::stream::{self, StreamExt};
 use log::trace;
 use serde::{de::DeserializeOwned, Serialize};
+use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -18,19 +21,21 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub struct Server<C>
+pub struct Server<C, E>
 where
-    C: Command,
+    C: Command + Clone,
+    E: CommandExecutor<C> + Clone,
 {
-    rpc_server: RpcServer<C>,
+    rpc_server: RpcServer<C, E>,
 }
 
-impl<C> Server<C>
+impl<C, E> Server<C, E>
 where
-    C: Command + std::fmt::Debug + Clone + Send + Sync + Serialize + DeserializeOwned + 'static,
+    C: Command + Debug + Clone + Send + Sync + Serialize + DeserializeOwned + 'static,
+    E: CommandExecutor<C> + Clone + Send + Sync + 'static,
 {
-    pub async fn new(conf: Configure) -> Self {
-        let inner = Arc::new(InnerServer::new(conf));
+    pub async fn new(conf: Configure, cmd_exe: E) -> Self {
+        let inner = Arc::new(InnerServer::new(conf, cmd_exe).await);
         let rpc_server = RpcServer::new(inner.conf(), inner.clone()).await;
         Self { rpc_server }
     }
@@ -40,28 +45,32 @@ where
     }
 }
 
-pub struct InnerServer<C>
+pub struct InnerServer<C, E>
 where
-    C: Command,
+    C: Command + Clone,
+    E: CommandExecutor<C> + Clone,
 {
     conf: Configure,
     // Connection List is modified once on initialization,
     // and connection linked to self should be empty
     conns: RwLock<Vec<Option<Arc<Mutex<TcpStream>>>>>,
-    replica: Arc<Mutex<Replica<C>>>,
+    replica: Arc<Mutex<Replica<C, E>>>,
 }
 
-impl<C> InnerServer<C>
+impl<C, E> InnerServer<C, E>
 where
     C: Command + std::fmt::Debug + Clone + Serialize + Send + Sync + 'static,
+    E: CommandExecutor<C> + Clone + Send + Sync + 'static,
 {
-    pub(crate) fn new(conf: Configure) -> Self {
+    pub(crate) async fn new(conf: Configure, cmd_exe: E) -> Self {
         let peer_cnt = conf.peer_cnt;
         let id = conf.index;
         Self {
             conf,
             conns: RwLock::new(vec![]),
-            replica: Arc::new(Mutex::new(Replica::new(id, peer_cnt as usize))),
+            replica: Arc::new(Mutex::new(
+                Replica::new(id, peer_cnt as usize, cmd_exe).await,
+            )),
         }
     }
 
@@ -78,14 +87,147 @@ where
             Message::PreAcceptReply(par) => self.handle_preaccept_reply(par).await,
             Message::PreAcceptOk(pao) => self.handle_preaccept_ok(pao).await,
             Message::Accept(a) => self.handle_accept(a).await,
-            Message::AcceptReply(_) => todo!(),
+            Message::AcceptReply(ar) => self.handle_accept_reply(ar).await,
             Message::Commit(cm) => self.handle_commit(cm).await,
             Message::CommitShort(_) => todo!(),
             Message::Propose(p) => self.handle_propose(p).await,
         }
     }
 
-    async fn handle_accept(&self, _a: Accept) {}
+    async fn handle_accept_reply(&self, ar: AcceptReply) {
+        trace!("handle accept reply");
+
+        let r = self.replica.lock().await;
+        let orig = r
+            .instance_space
+            .get_instance(&ar.instance_id.replica, &ar.instance_id.inner)
+            .await;
+
+        if !instance_exist(&orig).await {
+            panic!("The instance {:?} should exist", ar.instance_id);
+        }
+
+        let orig = orig.unwrap();
+        let mut ins_write = orig.get_instance_write().await;
+        let ins = ins_write.as_mut().unwrap();
+
+        if !ar.ok {
+            ins.lb.nack += 1;
+            if ar.ballot > ins.lb.max_ballot {
+                ins.lb.max_ballot = ar.ballot;
+            }
+            return;
+        }
+
+        ins.lb.accept_ok += 1;
+
+        if ins.lb.accept_ok >= r.peer_cnt / 2 {
+            ins.status = InstanceStatus::Committed;
+            // TODO: sync to disk
+            self.bdcst_message(
+                r.id,
+                Message::<C>::Commit(Commit {
+                    leader_id: r.id.into(),
+                    instance_id: ar.instance_id,
+                    seq: ins.seq,
+                    cmds: ins.cmds.to_vec(),
+                    deps: ins.deps.to_vec(),
+                }),
+            )
+            .await;
+
+            drop(ins_write);
+
+            // TODO: sync to disk
+            let _ = r.exec_send.send(orig.clone()).await;
+            orig.notify_commit().await;
+        }
+    }
+
+    async fn handle_accept(&self, a: Accept) {
+        trace!("handle accept");
+
+        let mut r = self.replica.lock().await;
+
+        if a.instance_id.inner >= r.cur_instance(&a.instance_id.replica) {
+            r.set_cur_instance(&InstanceId {
+                replica: a.instance_id.replica,
+                inner: (*a.instance_id.inner + 1).into(),
+            });
+        }
+
+        let ins = r
+            .instance_space
+            .get_instance(&a.instance_id.replica, &a.instance_id.inner)
+            .await;
+
+        let exist = instance_exist(&ins).await;
+        if exist {
+            let ins = ins.unwrap();
+            let ins_read = ins.get_instance_read().await;
+            let ins_read_inner = ins_read.as_ref().unwrap();
+            if matches!(
+                ins_read_inner.status,
+                InstanceStatus::Committed | InstanceStatus::Executed
+            ) {
+                // We've translated to the later states
+                return;
+            }
+
+            let ins_ballot = ins_read_inner.ballot;
+            if a.ballot < ins_ballot {
+                self.reply(
+                    r.id,
+                    &a.leader_id,
+                    Message::<C>::AcceptReply(AcceptReply {
+                        instance_id: a.instance_id,
+                        ok: false,
+                        ballot: ins_ballot,
+                    }),
+                )
+                .await;
+                return;
+            }
+
+            drop(ins_read);
+
+            let mut ins_write = ins.get_instance_write().await;
+            let ins_write_inner = ins_write.as_mut().unwrap();
+            ins_write_inner.status = InstanceStatus::Accepted;
+            ins_write_inner.seq = a.seq;
+            ins_write_inner.deps = a.deps;
+        } else {
+            // Message reordering ?
+            let new_instance = SharedInstance::new(
+                Some(Instance {
+                    id: a.instance_id,
+                    seq: a.seq,
+                    ballot: a.ballot,
+                    cmds: vec![],
+                    deps: a.deps,
+                    status: InstanceStatus::Accepted,
+                    lb: LeaderBook::new(),
+                }),
+                None,
+            );
+            r.instance_space
+                .insert_instance(&a.instance_id.replica, &a.instance_id.inner, new_instance)
+                .await;
+        }
+
+        // TODO: sync to disk
+
+        self.reply(
+            r.id,
+            &a.leader_id,
+            Message::<C>::AcceptReply(AcceptReply {
+                instance_id: a.instance_id,
+                ok: true,
+                ballot: a.ballot,
+            }),
+        )
+        .await;
+    }
 
     async fn handle_commit(&self, cm: Commit<C>) {
         trace!("handle commit");
@@ -98,44 +240,71 @@ where
             });
         }
 
-        let ins = r.instance_space[*cm.instance_id.replica].get(*cm.instance_id.inner);
+        let ins = r
+            .instance_space
+            .get_instance(&cm.instance_id.replica, &cm.instance_id.inner)
+            .await;
 
-        match ins {
-            Some(ins) => {
-                let mut ins = ins.write().await;
-                ins.seq = cm.seq;
-                ins.deps = cm.deps;
-                ins.status = InstanceStatus::Committed;
-            }
-            None => {
-                let new_instance = Arc::new(RwLock::new(Instance {
-                    id: cm.instance_id.inner,
+        let exist = instance_exist(&ins).await;
+
+        let ins = if exist {
+            let orig = ins.unwrap();
+            let mut ins = orig.get_instance_write().await;
+            let mut ins_inner = ins.as_mut().unwrap();
+            ins_inner.seq = cm.seq;
+            ins_inner.deps = cm.deps;
+            ins_inner.status = InstanceStatus::Committed;
+            drop(ins);
+            orig
+        } else {
+            let new_instance = SharedInstance::new(
+                Some(Instance {
+                    id: cm.instance_id,
                     seq: cm.seq,
                     ballot: Ballot::new(),
                     cmds: cm.cmds.to_vec(),
                     deps: cm.deps,
                     status: InstanceStatus::Committed,
                     lb: LeaderBook::new(),
-                }));
-                r.instance_space[*cm.instance_id.replica]
-                    .insert(*cm.instance_id.inner, new_instance.clone());
-                r.update_conflict(&cm.cmds, new_instance).await;
-            }
-        }
+                }),
+                None,
+            );
+            r.instance_space
+                .insert_instance(
+                    &cm.instance_id.replica,
+                    &cm.instance_id.inner,
+                    new_instance.clone(),
+                )
+                .await;
+            r.update_conflict(&cm.instance_id.replica, &cm.cmds, new_instance.clone())
+                .await;
+            new_instance
+        };
 
         // TODO: sync to disk
+
+        // TODO: Handle Error
+        let _ = r.exec_send.send(ins.clone()).await;
+        ins.notify_commit().await;
     }
 
     async fn handle_preaccept_reply(&self, par: PreAcceptReply) {
         trace!("handle preaccept reply");
         let r = self.replica.lock().await;
 
-        let ins = r.instance_space[*par.instance_id.replica].get(*par.instance_id.inner);
+        let ins = r
+            .instance_space
+            .get_instance(&par.instance_id.replica, &par.instance_id.inner)
+            .await;
 
-        if ins.is_none() {
+        if !instance_exist(&ins).await {
             panic!("This instance should already in the space");
         }
-        let mut ins = ins.unwrap().write().await;
+
+        // We've checked the existence
+        let orig = ins.unwrap();
+        let mut ins_write = orig.get_instance_write().await;
+        let mut ins = ins_write.as_mut().unwrap();
 
         if !matches!(ins.status, InstanceStatus::PreAccepted) {
             // We've translated to the later states
@@ -157,7 +326,7 @@ where
 
         ins.lb.preaccept_ok += 1;
 
-        let equal = r.merge_seq_deps(&mut ins, &par.seq, &par.deps);
+        let equal = r.merge_seq_deps(ins, &par.seq, &par.deps);
         if ins.lb.preaccept_ok > 1 {
             ins.lb.all_equal = ins.lb.all_equal && equal;
         }
@@ -176,6 +345,10 @@ where
                 }),
             )
             .await;
+
+            drop(ins_write);
+            let _ = r.exec_send.send(orig.clone()).await;
+            orig.notify_commit().await;
         } else if ins.lb.preaccept_ok >= r.peer_cnt / 2 {
             ins.status = InstanceStatus::Accepted;
             self.bdcst_message(
@@ -197,51 +370,63 @@ where
         trace!("handle preaccept ok");
         let r = self.replica.lock().await;
 
-        let ins = r.instance_space[*pao.instance_id.replica].get(*pao.instance_id.inner);
+        let ins = r
+            .instance_space
+            .get_instance(&pao.instance_id.replica, &pao.instance_id.inner)
+            .await;
 
-        if ins.is_none() {
+        if !instance_exist(&ins).await {
             panic!("This instance should already in the space");
         }
-        let mut ins = ins.unwrap().write().await;
 
-        if !matches!(ins.status, InstanceStatus::PreAccepted) {
+        let ins = ins.unwrap();
+        let mut ins_write = ins.get_instance_write().await;
+        let mut ins_write_inner = ins_write.as_mut().unwrap();
+
+        if !matches!(ins_write_inner.status, InstanceStatus::PreAccepted) {
             // We've translated to the later states
             return;
         }
 
-        if !ins.ballot.is_init() {
+        if !ins_write_inner.ballot.is_init() {
             // only the first leader can send ok
             return;
         }
 
-        ins.lb.preaccept_ok += 1;
+        ins_write_inner.lb.preaccept_ok += 1;
 
         // TODO: remove duplicate code
-        if ins.lb.preaccept_ok >= r.peer_cnt / 2 && ins.lb.all_equal && ins.ballot.is_init() {
-            ins.status = InstanceStatus::Committed;
+        if ins_write_inner.lb.preaccept_ok >= r.peer_cnt / 2
+            && ins_write_inner.lb.all_equal
+            && ins_write_inner.ballot.is_init()
+        {
+            ins_write_inner.status = InstanceStatus::Committed;
             // TODO: sync to disk
             self.bdcst_message(
                 r.id,
                 Message::<C>::Commit(Commit {
                     leader_id: r.id.into(),
                     instance_id: pao.instance_id,
-                    seq: ins.seq,
-                    cmds: ins.cmds.to_vec(),
-                    deps: ins.deps.to_vec(),
+                    seq: ins_write_inner.seq,
+                    cmds: ins_write_inner.cmds.to_vec(),
+                    deps: ins_write_inner.deps.to_vec(),
                 }),
             )
             .await;
-        } else if ins.lb.preaccept_ok >= r.peer_cnt / 2 {
-            ins.status = InstanceStatus::Accepted;
+            drop(ins_write);
+            let _ = r.exec_send.send(ins.clone()).await;
+            ins.notify_commit().await;
+        } else if ins_write_inner.lb.preaccept_ok >= r.peer_cnt / 2 {
+            ins_write_inner.status = InstanceStatus::Accepted;
             self.bdcst_message(
                 r.id,
                 Message::<C>::Accept(Accept {
                     leader_id: r.id.into(),
                     instance_id: pao.instance_id,
-                    ballot: ins.ballot,
-                    seq: ins.seq,
-                    cmd_cnt: ins.cmds.len(),
-                    deps: ins.deps.to_vec(),
+                    ballot: ins_write_inner.ballot,
+                    seq: ins_write_inner.seq,
+                    cmd_cnt: ins_write_inner.cmds.len(),
+                    deps: ins_write_inner.deps.to_vec(),
                 }),
             )
             .await;
@@ -251,34 +436,44 @@ where
     async fn handle_preaccept(&self, pa: PreAccept<C>) {
         trace!("handle preaccept {:?}", pa);
         let mut r = self.replica.lock().await;
-        if let Some(inst) = r.instance_space[*pa.instance_id.replica].get(*pa.instance_id.inner) {
-            let inst_read = inst.read().await;
+        let ins = r
+            .instance_space
+            .get_instance(&pa.instance_id.replica, &pa.instance_id.inner)
+            .await;
+
+        if instance_exist(&ins).await {
+            // TODO: abstract to a macro
+            let ins = ins.unwrap();
+            let ins_read = ins.get_instance_read().await;
+            let ins_read_inner = ins_read.as_ref().unwrap();
 
             // We've got accpet or commit before, don't reply
             if matches!(
-                inst_read.status,
+                ins_read_inner.status,
                 InstanceStatus::Committed | InstanceStatus::Accepted
             ) {
                 // Later message may not contain commands, we should fill it here
-                if inst_read.cmds.is_empty() {
-                    drop(inst_read);
-                    let mut inst_write = inst.write().await;
-                    inst_write.cmds = pa.cmds;
+                if ins_read_inner.cmds.is_empty() {
+                    drop(ins_read);
+                    // TODO: abstract to a macro
+                    let mut inst_write = ins.get_instance_write().await;
+                    let mut inst_write_inner = inst_write.as_mut().unwrap();
+                    inst_write_inner.cmds = pa.cmds;
                 }
                 return;
             }
 
             // smaller Ballot number
-            if pa.ballot < inst_read.ballot {
+            if pa.ballot < ins_read_inner.ballot {
                 self.reply(
                     r.id,
                     &pa.leader_id,
                     Message::<C>::PreAcceptReply(PreAcceptReply {
                         instance_id: pa.instance_id,
-                        seq: inst_read.seq,
-                        ballot: inst_read.ballot,
+                        seq: ins_read_inner.seq,
+                        ballot: ins_read_inner.ballot,
                         ok: false,
-                        deps: inst_read.deps.to_vec(),
+                        deps: ins_read_inner.deps.to_vec(),
                         committed_deps: r.commited_upto.to_vec(),
                     }),
                 )
@@ -318,21 +513,31 @@ where
             .count()
             > 0;
 
-        let new_instance = Arc::new(RwLock::new(Instance {
-            id: pa.instance_id.inner,
-            seq,
-            ballot: pa.ballot,
-            // FIXME: should not copy
-            cmds: pa.cmds.to_vec(),
-            // FIXME: Should not copy if we send reply ok later
-            deps: deps.to_vec(),
-            status,
-            lb: LeaderBook::new(),
-        }));
-        r.instance_space[*pa.instance_id.replica]
-            .insert(*pa.instance_id.inner, new_instance.clone());
+        let new_instance = SharedInstance::new(
+            Some(Instance {
+                id: pa.instance_id,
+                seq,
+                ballot: pa.ballot,
+                // FIXME: should not copy
+                cmds: pa.cmds.to_vec(),
+                // FIXME: Should not copy if we send reply ok later
+                deps: deps.to_vec(),
+                status,
+                lb: LeaderBook::new(),
+            }),
+            None,
+        );
 
-        r.update_conflict(&pa.cmds, new_instance).await;
+        r.instance_space
+            .insert_instance(
+                &pa.instance_id.replica,
+                &pa.instance_id.inner,
+                new_instance.clone(),
+            )
+            .await;
+
+        r.update_conflict(&pa.instance_id.replica, &pa.cmds, new_instance)
+            .await;
 
         // TODO: sync to disk
 
@@ -372,24 +577,37 @@ where
     async fn handle_propose(&self, p: Propose<C>) {
         trace!("handle process");
         let mut r = self.replica.lock().await;
-        let inst_no = *r.local_cur_instance();
+        let inst_id = *r.local_cur_instance();
         r.inc_local_cur_instance();
         let (seq, deps) = r.get_seq_deps(&p.cmds).await;
 
-        let new_inst = Arc::new(RwLock::new(Instance {
-            id: inst_no,
-            seq,
-            ballot: 0.into(),
-            cmds: p.cmds,
-            deps,
-            status: InstanceStatus::PreAccepted,
-            lb: LeaderBook::new(),
-        }));
-        r.update_conflict(&new_inst.read().await.cmds, new_inst.clone())
+        let new_ins = SharedInstance::new(
+            Some(Instance {
+                id: InstanceId {
+                    inner: inst_id,
+                    replica: r.id,
+                },
+                seq,
+                ballot: 0.into(),
+                cmds: p.cmds,
+                deps,
+                status: InstanceStatus::PreAccepted,
+                lb: LeaderBook::new(),
+            }),
+            None,
+        );
+
+        let new_ins_read = new_ins.get_instance_read().await;
+        let new_ins_read_inner = new_ins_read.as_ref().unwrap();
+
+        let r_id = r.id;
+        r.update_conflict(&r_id, &new_ins_read_inner.cmds, new_ins.clone())
             .await;
 
-        let r_id = *r.id;
-        r.instance_space[r_id].insert(*inst_no, new_inst.clone());
+        let r_id = r.id;
+        r.instance_space
+            .insert_instance(&r_id, &inst_id, new_ins.clone())
+            .await;
 
         if seq > r.max_seq {
             r.max_seq = (*seq + 1).into();
@@ -402,13 +620,13 @@ where
                 leader_id: r.id.into(),
                 instance_id: InstanceId {
                     replica: r.id,
-                    inner: inst_no,
+                    inner: inst_id,
                 },
                 seq,
                 ballot: 0.into(),
                 // FIXME: should not copy/clone vec
-                cmds: new_inst.read().await.cmds.to_vec(),
-                deps: new_inst.read().await.deps.to_vec(),
+                cmds: new_ins_read_inner.cmds.to_vec(),
+                deps: new_ins_read_inner.deps.to_vec(),
             }),
         )
         .await;
@@ -490,19 +708,21 @@ where
     }
 }
 
-pub(crate) struct RpcServer<C>
+pub(crate) struct RpcServer<C, E>
 where
-    C: Command,
+    C: Command + Clone,
+    E: CommandExecutor<C> + Clone,
 {
-    server: Arc<InnerServer<C>>,
+    server: Arc<InnerServer<C, E>>,
     listener: TcpListener,
 }
 
-impl<C> RpcServer<C>
+impl<C, E> RpcServer<C, E>
 where
     C: Command + std::fmt::Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+    E: CommandExecutor<C> + Clone + Send + Sync + 'static,
 {
-    pub(crate) async fn new(config: &Configure, server: Arc<InnerServer<C>>) -> Self {
+    pub(crate) async fn new(config: &Configure, server: Arc<InnerServer<C, E>>) -> Self {
         // Configure correctness has been checked
         let listener = TcpListener::bind(config.peer.get(config.index as usize).unwrap())
             .await
