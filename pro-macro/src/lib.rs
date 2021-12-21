@@ -33,6 +33,48 @@ pub fn from_inner(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                                             &self.#ident
                                         }
                                     }
+
+                                    impl std::ops::Add<usize> for #name {
+                                        type Output = #name;
+
+                                        fn add(self, rhs: usize) -> Self::Output {
+                                            Self {
+                                                #ident: self.#ident + rhs
+                                            }
+                                        }
+                                    }
+
+                                    impl std::ops::AddAssign<usize> for #name {
+                                        fn add_assign(&mut self, rhs: usize) {
+                                            self.#ident += rhs;
+                                        }
+                                    }
+
+                                    impl<'a> std::ops::Add<usize> for &'a mut #name {
+                                        type Output = #name;
+
+                                        fn add(self, rhs: usize) -> Self::Output {
+                                            #name {
+                                                #ident: self.#ident + rhs,
+                                            }
+                                        }
+                                    }
+
+                                    impl<'a> std::ops::Add<usize> for &'a #name {
+                                        type Output = #name;
+
+                                        fn add(self, rhs: usize) -> Self::Output {
+                                            #name {
+                                                #ident: self.#ident + rhs,
+                                            }
+                                        }
+                                    }
+
+                                    impl std::ops::AddAssign<usize> for &mut #name {
+                                        fn add_assign(&mut self, rhs: usize) {
+                                            self.#ident += rhs;
+                                        }
+                                    }
                                 }
                             })
                         })
@@ -56,6 +98,42 @@ pub fn from_inner(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                             type Target = #t;
                             fn deref(&self) -> &Self::Target {
                                 &self.0
+                            }
+                        }
+
+                        impl std::ops::Add<usize> for #name {
+                            type Output = #name;
+
+                            fn add(self, rhs: usize) -> Self::Output {
+                                Self(self.0 + rhs)
+                            }
+                        }
+
+                        impl std::ops::AddAssign<usize> for #name {
+                            fn add_assign(&mut self, rhs: usize) {
+                                self.0 += rhs;
+                            }
+                        }
+
+                        impl<'a> std::ops::Add<usize> for &'a mut #name {
+                            type Output = #name;
+
+                            fn add(self, rhs: usize) -> Self::Output {
+                                #name(self.0 + rhs)
+                            }
+                        }
+
+                        impl<'a> std::ops::Add<usize> for &'a #name {
+                            type Output = #name;
+
+                            fn add(self, rhs: usize) -> Self::Output {
+                                #name(self.0 + rhs)
+                            }
+                        }
+
+                        impl std::ops::AddAssign<usize> for &mut #name {
+                            fn add_assign(&mut self, rhs: usize) {
+                                self.0 += rhs;
                             }
                         }
                     }
