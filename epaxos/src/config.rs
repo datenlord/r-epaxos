@@ -7,14 +7,20 @@ pub struct Configure {
     pub(crate) peer_cnt: usize,
     pub(crate) peer: Vec<String>,
     pub(crate) index: usize,
+    pub(crate) epoch: usize,
 }
 
 impl Configure {
-    pub fn new(peer_cnt: usize, peer: Vec<String>, index: usize) -> Self {
+    pub fn new(peer_cnt: usize, peer: Vec<String>, index: usize, epoch: usize) -> Self {
+        if (peer_cnt % 2) == 0 {
+            panic!("The peer count should be odd, but we got {}", peer_cnt);
+        }
+
         Self {
             peer_cnt,
             peer,
             index,
+            epoch,
         }
     }
 }
@@ -66,10 +72,13 @@ impl ConfigureSrc for YamlConfigureSrc {
 
         let index = yaml["index"].as_i64().unwrap() as usize;
 
+        let epoch: usize = yaml["epoch"].as_i64().unwrap() as usize;
+
         Configure {
             peer_cnt,
             peer,
             index,
+            epoch,
         }
     }
 }

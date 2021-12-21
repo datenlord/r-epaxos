@@ -78,6 +78,14 @@ where
         &self.conf
     }
 
+    pub(crate) async fn new_leaderbook(&self) -> LeaderBook {
+        LeaderBook::new(self.replica.lock().await.id, &self.conf)
+    }
+
+    pub(crate) async fn new_ballot(&self) -> Ballot {
+        Ballot::new(self.replica.lock().await.id, &self.conf)
+    }
+
     pub(crate) async fn handle_message(&self, message: Message<C>)
     where
         C: Command + Serialize,
@@ -206,7 +214,7 @@ where
                     cmds: vec![],
                     deps: a.deps,
                     status: InstanceStatus::Accepted,
-                    lb: LeaderBook::new(),
+                    lb: self.new_leaderbook().await,
                 }),
                 None,
             );
@@ -261,11 +269,11 @@ where
                 Some(Instance {
                     id: cm.instance_id,
                     seq: cm.seq,
-                    ballot: Ballot::new(),
+                    ballot: self.new_ballot().await,
                     cmds: cm.cmds.to_vec(),
                     deps: cm.deps,
                     status: InstanceStatus::Committed,
-                    lb: LeaderBook::new(),
+                    lb: self.new_leaderbook().await,
                 }),
                 None,
             );
@@ -523,7 +531,7 @@ where
                 // FIXME: Should not copy if we send reply ok later
                 deps: deps.to_vec(),
                 status,
-                lb: LeaderBook::new(),
+                lb: self.new_leaderbook().await,
             }),
             None,
         );
@@ -588,11 +596,11 @@ where
                     replica: r.id,
                 },
                 seq,
-                ballot: 0.into(),
+                ballot: self.new_ballot().await,
                 cmds: p.cmds,
                 deps,
                 status: InstanceStatus::PreAccepted,
-                lb: LeaderBook::new(),
+                lb: self.new_leaderbook().await,
             }),
             None,
         );
@@ -623,7 +631,7 @@ where
                     inner: inst_id,
                 },
                 seq,
-                ballot: 0.into(),
+                ballot: self.new_ballot().await,
                 // FIXME: should not copy/clone vec
                 cmds: new_ins_read_inner.cmds.to_vec(),
                 deps: new_ins_read_inner.deps.to_vec(),

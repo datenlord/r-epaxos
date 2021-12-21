@@ -69,7 +69,7 @@ async fn main() -> io::Result<()> {
     let cmd_exe = TestCommandExecutor {};
 
     let mut server = Vec::with_capacity(3);
-    for c in (0..3).map(|id| Configure::new(3, peer.to_vec(), id)) {
+    for c in (0..3).map(|id| Configure::new(3, peer.to_vec(), id, 0)) {
         server.push(Server::<TestCommand, TestCommandExecutor>::new(c, cmd_exe).await);
     }
 
@@ -84,7 +84,7 @@ async fn main() -> io::Result<()> {
 
     debug!("spawn servers");
 
-    let mut client = TcpRpcClient::<TestCommand>::new(Configure::new(3, peer, 0), 0).await;
+    let mut client = TcpRpcClient::<TestCommand>::new(Configure::new(3, peer, 0, 0), 0).await;
     client
         .propose(vec![TestCommand {
             key: "k1".to_owned(),

@@ -6,3 +6,5 @@ pub mod message;
 pub mod server;
 mod types;
 mod util;
+
+pub use types::Command;
