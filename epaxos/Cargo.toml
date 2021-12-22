@@ -12,9 +12,10 @@ env_logger = "0.9.0"
 futures = "0.3.17"
 itertools = "0.10.1"
 log = "0.4.14"
+mockall = "0.11.0"
+petgraph = "0.6.0"
 pro-macro = {path = "../pro-macro"}
 serde = {version = "1.0.130", features = ["derive"]}
 thiserror = "1.0.30"
 tokio = {version = "1.14", features = ["net", "rt", "io-util", "sync", "macros", "rt-multi-thread", "time"]}
 yaml-rust = "0.4.5"
-petgraph = "0.6.0"

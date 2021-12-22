@@ -1,4 +1,4 @@
-use std::{collections::HashMap, iter, marker::PhantomData};
+use std::{collections::HashMap, fmt::Debug, iter, marker::PhantomData, sync::Arc};
 
 use itertools::Itertools;
 use tokio::sync::mpsc;
@@ -13,14 +13,15 @@ use super::{
 };
 
 type Conflict<C> = Vec<HashMap<<C as Command>::K, SharedInstance<C>>>;
-pub struct Replica<C, E>
+pub(crate) struct Replica<C, E, S>
 where
-    C: Command + Clone,
+    C: Command + Clone + Send + Sync + 'static,
     E: CommandExecutor<C> + Clone,
+    S: InstanceSpace<C>,
 {
     pub(crate) id: ReplicaId,
     pub(crate) peer_cnt: usize,
-    pub(crate) instance_space: InstanceSpace<C>,
+    pub(crate) instance_space: Arc<S>,
     /// Current max instance id for each replica, init values are 0s
     pub(crate) cur_instance: Vec<LocalInstanceId>,
     pub(crate) commited_upto: Vec<Option<LocalInstanceId>>,
@@ -30,13 +31,14 @@ where
     phantom: PhantomData<E>,
 }
 
-impl<C, E> Replica<C, E>
+impl<C, E, S> Replica<C, E, S>
 where
-    C: Command + Sync + Send + Clone + 'static,
-    E: CommandExecutor<C> + Clone + Sync + Send + 'static,
+    C: Command + Debug + Clone + Sync + Send + 'static,
+    E: CommandExecutor<C> + Debug + Clone + Sync + Send + 'static,
+    S: InstanceSpace<C> + Send + Sync + 'static,
 {
     pub(crate) async fn new(id: usize, peer_cnt: usize, cmd_exe: E) -> Self {
-        let instance_space = InstanceSpace::new(peer_cnt);
+        let instance_space = Arc::new(S::new(peer_cnt));
         let mut cur_instance = Vec::with_capacity(peer_cnt);
         let mut commited_upto = Vec::with_capacity(peer_cnt);
         let mut conflict = Vec::with_capacity(peer_cnt);
@@ -74,7 +76,7 @@ where
     }
 
     pub(crate) fn set_cur_instance(&mut self, inst: &InstanceId) {
-        self.cur_instance[*inst.replica] = inst.inner;
+        self.cur_instance[*inst.replica] = inst.local;
     }
 
     pub(crate) fn local_cur_instance(&self) -> &LocalInstanceId {
