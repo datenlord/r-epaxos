@@ -1,5 +1,5 @@
-use std::hash::Hash;
 use std::sync::Arc;
+use std::{fmt::Debug, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock, RwLockMappedWriteGuard, RwLockReadGuard, RwLockWriteGuard};
@@ -10,6 +10,7 @@ use super::{
     lb::LeaderBook,
 };
 
+#[derive(Debug)]
 /// The instance stored in the instance space
 pub struct Instance<C>
 where
@@ -29,10 +30,11 @@ where
     C: Command,
 {
     pub(crate) fn local_id(&self) -> LocalInstanceId {
-        self.id.inner
+        self.id.local
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct SharedInstanceInner<C>
 where
     C: Command + Clone,
@@ -42,7 +44,7 @@ where
 }
 
 /// Th shared instance stored in the instance space
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct SharedInstance<C>
 where
     C: Command + Clone,
@@ -55,7 +57,7 @@ where
     C: Command + Clone,
 {
     fn eq(&self, other: &Self) -> bool {
-        Arc::as_ptr(&self.inner) == Arc::as_ptr(&other.inner)
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
@@ -143,7 +145,7 @@ where
 }
 
 /// The status of the instance, which is recorded in the instance space
-#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum InstanceStatus {
     PreAccepted,
     PreAcceptedEq,

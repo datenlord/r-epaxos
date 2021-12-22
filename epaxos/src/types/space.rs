@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+#[cfg(test)]
+use mockall::automock;
 use tokio::sync::{Notify, RwLock};
 
 use crate::util::instance_exist;
@@ -10,29 +13,66 @@ use super::{
     instance::{InstanceStatus, SharedInstance},
 };
 
+#[cfg_attr(test, automock)]
+#[async_trait]
+pub(crate) trait InstanceSpace<C>
+where
+    C: Command + Clone + Send + Sync + 'static,
+{
+    /// Constructor to create a instance space
+    fn new(peer_cnt: usize) -> Self;
+
+    /// Get the instance, if the it returns a Notify it means the instance
+    /// is not ready, and the Notify is stored in the Notify Vec. The
+    /// returned Notify is always fresh new, so we don't reuse it to
+    /// avoid racing.
+    async fn get_instance_or_notify(
+        &self,
+        replica: &ReplicaId,
+        instance_id: &LocalInstanceId,
+    ) -> (Option<SharedInstance<C>>, Option<Arc<Notify>>);
+
+    /// Get the instance if it's created, otherwise None is returned
+    /// TODO: unify `get_instance` and `get_instance_or_notify`
+    async fn get_instance(
+        &self,
+        replica: &ReplicaId,
+        instance_id: &LocalInstanceId,
+    ) -> Option<SharedInstance<C>>;
+
+    /// Helper function to insert instance into instance space. Because there might be hole
+    /// in the space, we fill the hole as None for the later get operation.
+    async fn insert_instance(
+        &self,
+        replica: &ReplicaId,
+        instance_id: &LocalInstanceId,
+        instance: SharedInstance<C>,
+    );
+}
+
 // FIXME: maybe hashmap is more fit in this case.
 // A (replica_id, instance_id) pair to instance mapping.
 // And a big rwlock is not efficient here.
-#[derive(Clone)]
-pub(crate) struct InstanceSpace<C>
+pub struct VecInstanceSpace<C>
 where
-    C: Command + Clone,
+    C: Command + Clone + Send + Sync + 'static,
 {
-    inner: Arc<RwLock<Vec<Vec<SharedInstance<C>>>>>,
+    inner: RwLock<Vec<Vec<SharedInstance<C>>>>,
 }
 
-impl<C> InstanceSpace<C>
+#[async_trait]
+impl<C> InstanceSpace<C> for VecInstanceSpace<C>
 where
-    C: Command + Clone,
+    C: Command + Clone + Send + Sync + 'static,
 {
-    pub(crate) fn new(peer_cnt: usize) -> Self {
+    fn new(peer_cnt: usize) -> Self {
         let mut peer_vec = Vec::with_capacity(peer_cnt);
         (0..peer_cnt).for_each(|_| {
             peer_vec.push(vec![]);
         });
 
         Self {
-            inner: Arc::new(RwLock::new(peer_vec)),
+            inner: RwLock::new(peer_vec),
         }
     }
 
@@ -40,7 +80,7 @@ where
     /// is not ready, and the Notify is stored in the Notify Vec. The
     /// returned Notify is always fresh new, we don't reuse notify to
     /// avoid racing.
-    pub(crate) async fn get_instance_or_notify(
+    async fn get_instance_or_notify(
         &self,
         replica: &ReplicaId,
         instance_id: &LocalInstanceId,
@@ -76,24 +116,9 @@ where
         }
     }
 
-    async fn need_notify(ins: &Option<SharedInstance<C>>) -> bool {
-        if !instance_exist(ins).await {
-            true
-        } else {
-            let d_ins = ins.as_ref().unwrap();
-            let d_ins_read = d_ins.get_instance_read().await;
-            let d_ins_read_inner = d_ins_read.as_ref().unwrap();
-
-            !matches!(
-                d_ins_read_inner.status,
-                InstanceStatus::Committed | InstanceStatus::Executed
-            )
-        }
-    }
-
     /// Get the instance if it's created, otherwise None is returned
     /// TODO: unify `get_instance` and `get_instance_or_notify`
-    pub(crate) async fn get_instance(
+    async fn get_instance(
         &self,
         replica: &ReplicaId,
         instance_id: &LocalInstanceId,
@@ -112,7 +137,7 @@ where
 
     /// Helper function to insert instance into instance space. Because there might be hole
     /// in the space, we fill the hole as None for the later get operation.
-    pub(crate) async fn insert_instance(
+    async fn insert_instance(
         &self,
         replica: &ReplicaId,
         instance_id: &LocalInstanceId,
@@ -134,6 +159,26 @@ where
                 space[replica_id].push(instance);
             }
             None => {}
+        }
+    }
+}
+
+impl<C> VecInstanceSpace<C>
+where
+    C: Command + Clone + Send + Sync + 'static,
+{
+    async fn need_notify(ins: &Option<SharedInstance<C>>) -> bool {
+        if !instance_exist(ins).await {
+            true
+        } else {
+            let d_ins = ins.as_ref().unwrap();
+            let d_ins_read = d_ins.get_instance_read().await;
+            let d_ins_read_inner = d_ins_read.as_ref().unwrap();
+
+            !matches!(
+                d_ins_read_inner.status,
+                InstanceStatus::Committed | InstanceStatus::Executed
+            )
         }
     }
 }

@@ -12,10 +12,16 @@ pub(crate) struct ReplicaId(usize);
 pub(crate) struct LocalInstanceId(usize);
 
 /// The global instance id
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct InstanceId {
     pub(crate) replica: ReplicaId,
-    pub(crate) inner: LocalInstanceId,
+    pub(crate) local: LocalInstanceId,
+}
+
+impl InstanceId {
+    pub(crate) fn new(replica: ReplicaId, local: LocalInstanceId) -> Self {
+        Self { replica, local }
+    }
 }
 
 /// The seq num, which break the dependent circle while executing
@@ -41,6 +47,26 @@ impl Ballot {
 
     pub(crate) fn is_init(&self) -> bool {
         self.base == 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_epoch(replica: ReplicaId, epoch: usize) -> Ballot {
+        Ballot {
+            replica,
+            epoch,
+            base: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for Ballot {
+    fn default() -> Self {
+        Self {
+            epoch: Default::default(),
+            base: Default::default(),
+            replica: ReplicaId(0),
+        }
     }
 }
 

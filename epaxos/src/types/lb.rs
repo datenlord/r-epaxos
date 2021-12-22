@@ -2,6 +2,8 @@ use crate::config::Configure;
 
 use super::id::{Ballot, ReplicaId};
 
+#[derive(Debug)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct LeaderBook {
     pub(crate) accept_ok: usize,
     pub(crate) preaccept_ok: usize,

@@ -5,8 +5,8 @@ use crate::{
         Accept, AcceptReply, Commit, Message, PreAccept, PreAcceptOk, PreAcceptReply, Propose,
     },
     types::{
-        Ballot, Command, CommandExecutor, Instance, InstanceId, InstanceStatus, LeaderBook,
-        LeaderId, Replica, ReplicaId, SharedInstance,
+        Ballot, Command, CommandExecutor, Instance, InstanceId, InstanceSpace, InstanceStatus,
+        LeaderBook, LeaderId, Replica, ReplicaId, SharedInstance, VecInstanceSpace,
     },
     util::{self, instance_exist},
 };
@@ -21,18 +21,45 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub struct Server<C, E>
+/// Hide
+pub struct DefaultServer<C, E>
 where
-    C: Command + Clone,
+    C: Command + Clone + Send + Sync + 'static,
     E: CommandExecutor<C> + Clone,
 {
-    rpc_server: RpcServer<C, E>,
+    inner: Server<C, E, VecInstanceSpace<C>>,
 }
 
-impl<C, E> Server<C, E>
+impl<C, E> DefaultServer<C, E>
 where
     C: Command + Debug + Clone + Send + Sync + Serialize + DeserializeOwned + 'static,
-    E: CommandExecutor<C> + Clone + Send + Sync + 'static,
+    E: CommandExecutor<C> + Debug + Clone + Send + Sync + 'static,
+{
+    pub async fn new(conf: Configure, cmd_exe: E) -> Self {
+        Self {
+            inner: Server::new(conf, cmd_exe).await,
+        }
+    }
+
+    pub async fn run(&self) {
+        self.inner.run().await;
+    }
+}
+
+pub(crate) struct Server<C, E, S>
+where
+    C: Command + Clone + Send + Sync + 'static,
+    E: CommandExecutor<C> + Clone,
+    S: InstanceSpace<C>,
+{
+    rpc_server: RpcServer<C, E, S>,
+}
+
+impl<C, E, S> Server<C, E, S>
+where
+    C: Command + Debug + Clone + Send + Sync + Serialize + DeserializeOwned + 'static,
+    E: CommandExecutor<C> + Debug + Clone + Send + Sync + 'static,
+    S: InstanceSpace<C> + Send + Sync + 'static,
 {
     pub async fn new(conf: Configure, cmd_exe: E) -> Self {
         let inner = Arc::new(InnerServer::new(conf, cmd_exe).await);
@@ -45,22 +72,24 @@ where
     }
 }
 
-pub struct InnerServer<C, E>
+pub(crate) struct InnerServer<C, E, S>
 where
-    C: Command + Clone,
+    C: Command + Clone + Send + Sync + 'static,
     E: CommandExecutor<C> + Clone,
+    S: InstanceSpace<C>,
 {
     conf: Configure,
     // Connection List is modified once on initialization,
     // and connection linked to self should be empty
     conns: RwLock<Vec<Option<Arc<Mutex<TcpStream>>>>>,
-    replica: Arc<Mutex<Replica<C, E>>>,
+    replica: Arc<Mutex<Replica<C, E, S>>>,
 }
 
-impl<C, E> InnerServer<C, E>
+impl<C, E, S> InnerServer<C, E, S>
 where
-    C: Command + std::fmt::Debug + Clone + Serialize + Send + Sync + 'static,
-    E: CommandExecutor<C> + Clone + Send + Sync + 'static,
+    C: Command + Debug + Clone + Serialize + Send + Sync + 'static,
+    E: CommandExecutor<C> + Debug + Clone + Send + Sync + 'static,
+    S: InstanceSpace<C> + Send + Sync + 'static,
 {
     pub(crate) async fn new(conf: Configure, cmd_exe: E) -> Self {
         let peer_cnt = conf.peer_cnt;
@@ -108,7 +137,7 @@ where
         let r = self.replica.lock().await;
         let orig = r
             .instance_space
-            .get_instance(&ar.instance_id.replica, &ar.instance_id.inner)
+            .get_instance(&ar.instance_id.replica, &ar.instance_id.local)
             .await;
 
         if !instance_exist(&orig).await {
@@ -157,16 +186,16 @@ where
 
         let mut r = self.replica.lock().await;
 
-        if a.instance_id.inner >= r.cur_instance(&a.instance_id.replica) {
-            r.set_cur_instance(&InstanceId {
-                replica: a.instance_id.replica,
-                inner: (*a.instance_id.inner + 1).into(),
-            });
+        if a.instance_id.local >= r.cur_instance(&a.instance_id.replica) {
+            r.set_cur_instance(&InstanceId::new(
+                a.instance_id.replica,
+                (*a.instance_id.local + 1).into(),
+            ));
         }
 
         let ins = r
             .instance_space
-            .get_instance(&a.instance_id.replica, &a.instance_id.inner)
+            .get_instance(&a.instance_id.replica, &a.instance_id.local)
             .await;
 
         let exist = instance_exist(&ins).await;
@@ -219,7 +248,7 @@ where
                 None,
             );
             r.instance_space
-                .insert_instance(&a.instance_id.replica, &a.instance_id.inner, new_instance)
+                .insert_instance(&a.instance_id.replica, &a.instance_id.local, new_instance)
                 .await;
         }
 
@@ -241,16 +270,16 @@ where
         trace!("handle commit");
         let mut r = self.replica.lock().await;
 
-        if cm.instance_id.inner >= r.cur_instance(&cm.instance_id.replica) {
+        if cm.instance_id.local >= r.cur_instance(&cm.instance_id.replica) {
             r.set_cur_instance(&InstanceId {
                 replica: cm.instance_id.replica,
-                inner: (*cm.instance_id.inner + 1).into(),
+                local: (*cm.instance_id.local + 1).into(),
             });
         }
 
         let ins = r
             .instance_space
-            .get_instance(&cm.instance_id.replica, &cm.instance_id.inner)
+            .get_instance(&cm.instance_id.replica, &cm.instance_id.local)
             .await;
 
         let exist = instance_exist(&ins).await;
@@ -280,7 +309,7 @@ where
             r.instance_space
                 .insert_instance(
                     &cm.instance_id.replica,
-                    &cm.instance_id.inner,
+                    &cm.instance_id.local,
                     new_instance.clone(),
                 )
                 .await;
@@ -302,7 +331,7 @@ where
 
         let ins = r
             .instance_space
-            .get_instance(&par.instance_id.replica, &par.instance_id.inner)
+            .get_instance(&par.instance_id.replica, &par.instance_id.local)
             .await;
 
         if !instance_exist(&ins).await {
@@ -380,7 +409,7 @@ where
 
         let ins = r
             .instance_space
-            .get_instance(&pao.instance_id.replica, &pao.instance_id.inner)
+            .get_instance(&pao.instance_id.replica, &pao.instance_id.local)
             .await;
 
         if !instance_exist(&ins).await {
@@ -446,7 +475,7 @@ where
         let mut r = self.replica.lock().await;
         let ins = r
             .instance_space
-            .get_instance(&pa.instance_id.replica, &pa.instance_id.inner)
+            .get_instance(&pa.instance_id.replica, &pa.instance_id.local)
             .await;
 
         if instance_exist(&ins).await {
@@ -490,7 +519,7 @@ where
             }
         }
 
-        if pa.instance_id.inner > r.cur_instance(&pa.instance_id.replica) {
+        if pa.instance_id.local > r.cur_instance(&pa.instance_id.replica) {
             r.set_cur_instance(&pa.instance_id);
         }
 
@@ -539,7 +568,7 @@ where
         r.instance_space
             .insert_instance(
                 &pa.instance_id.replica,
-                &pa.instance_id.inner,
+                &pa.instance_id.local,
                 new_instance.clone(),
             )
             .await;
@@ -592,7 +621,7 @@ where
         let new_ins = SharedInstance::new(
             Some(Instance {
                 id: InstanceId {
-                    inner: inst_id,
+                    local: inst_id,
                     replica: r.id,
                 },
                 seq,
@@ -628,7 +657,7 @@ where
                 leader_id: r.id.into(),
                 instance_id: InstanceId {
                     replica: r.id,
-                    inner: inst_id,
+                    local: inst_id,
                 },
                 seq,
                 ballot: self.new_ballot().await,
@@ -716,21 +745,23 @@ where
     }
 }
 
-pub(crate) struct RpcServer<C, E>
+pub(crate) struct RpcServer<C, E, S>
 where
-    C: Command + Clone,
+    C: Command + Clone + Send + Sync + 'static,
     E: CommandExecutor<C> + Clone,
+    S: InstanceSpace<C>,
 {
-    server: Arc<InnerServer<C, E>>,
+    server: Arc<InnerServer<C, E, S>>,
     listener: TcpListener,
 }
 
-impl<C, E> RpcServer<C, E>
+impl<C, E, S> RpcServer<C, E, S>
 where
-    C: Command + std::fmt::Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
-    E: CommandExecutor<C> + Clone + Send + Sync + 'static,
+    C: Command + Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+    E: CommandExecutor<C> + Debug + Clone + Send + Sync + 'static,
+    S: InstanceSpace<C> + Send + Sync + 'static,
 {
-    pub(crate) async fn new(config: &Configure, server: Arc<InnerServer<C, E>>) -> Self {
+    pub(crate) async fn new(config: &Configure, server: Arc<InnerServer<C, E, S>>) -> Self {
         // Configure correctness has been checked
         let listener = TcpListener::bind(config.peer.get(config.index as usize).unwrap())
             .await

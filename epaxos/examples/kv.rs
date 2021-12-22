@@ -1,21 +1,15 @@
-pub mod client;
-pub mod config;
-pub mod error;
-mod execute;
-pub mod message;
-pub mod server;
-mod types;
-mod util;
+use std::{io, time::Duration};
 
-use std::time::Duration;
-
-use client::{RpcClient, TcpRpcClient};
-use config::Configure;
 use log::{debug, info};
+use rpaxos::{
+    client::{RpcClient, TcpRpcClient},
+    config::Configure,
+    error,
+    server::DefaultServer,
+    Command, CommandExecutor,
+};
 use serde::{Deserialize, Serialize};
-use server::Server;
-use tokio::{io, time::timeout};
-use types::{Command, CommandExecutor};
+use tokio::time::timeout;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TestCommandOp {
@@ -37,16 +31,9 @@ impl Command for TestCommand {
     fn key(&self) -> &Self::K {
         &self.key
     }
-
-    async fn execute<E>(&self, e: &E) -> Result<(), error::ExecuteError>
-    where
-        E: CommandExecutor<Self> + Sync + Send,
-    {
-        <E as CommandExecutor<Self>>::execute(e, self).await
-    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct TestCommandExecutor {}
 
 #[async_trait::async_trait]
@@ -70,7 +57,7 @@ async fn main() -> io::Result<()> {
 
     let mut server = Vec::with_capacity(3);
     for c in (0..3).map(|id| Configure::new(3, peer.to_vec(), id, 0)) {
-        server.push(Server::<TestCommand, TestCommandExecutor>::new(c, cmd_exe).await);
+        server.push(DefaultServer::<TestCommand, TestCommandExecutor>::new(c, cmd_exe).await);
     }
 
     let handles: Vec<_> = server

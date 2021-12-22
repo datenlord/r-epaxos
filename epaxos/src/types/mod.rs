@@ -4,7 +4,13 @@ pub(crate) use self::{
     instance::{Instance, InstanceStatus, SharedInstance},
     lb::LeaderBook,
     replica::Replica,
-    space::InstanceSpace,
+    space::{InstanceSpace, VecInstanceSpace},
+};
+
+#[cfg(test)]
+pub(crate) use self::{
+    cmd::{MockCommand, MockCommandExecutor, MockCommandId},
+    space::MockInstanceSpace,
 };
 
 mod cmd;

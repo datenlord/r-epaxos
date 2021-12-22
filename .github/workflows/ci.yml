@@ -43,8 +43,8 @@ jobs:
           command: clippy
           args: --all-features --all-targets -- -D warnings
 
-  ci:
-    name: Integration Test
+  test:
+    name: Test (UT/IT)
     runs-on: ubuntu-latest
     env:
       RUST_LOG: TRACE
@@ -59,4 +59,12 @@ jobs:
           components: ${{ env.RUST_TOOLCHAIN_COMPONENET }}
       - uses: actions-rs/cargo@v1
         with:
+          command: test
+      - name: change directory to epaxos
+        run: cd epaxos
+      # Fixme: Should not run example as it
+      - name: Run example as test
+        uses: actions-rs/cargo@v1
+        with:
           command: run
+          args: --example kv
