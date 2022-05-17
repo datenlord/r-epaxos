@@ -3,6 +3,7 @@ use crate::{
     error::RpcError,
     message::{
         Accept, AcceptReply, Commit, Message, PreAccept, PreAcceptOk, PreAcceptReply, Propose,
+        ProposeResponse, SingleCmdResult,
     },
     types::{
         Ballot, Command, CommandExecutor, Instance, InstanceId, InstanceSpace, InstanceStatus,
@@ -16,8 +17,9 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::{
+    io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::{Mutex, RwLock},
+    sync::{oneshot, Mutex, RwLock},
     task::JoinHandle,
 };
 
@@ -107,17 +109,18 @@ where
         &self.conf
     }
 
-    pub(crate) async fn new_leaderbook(&self) -> LeaderBook {
-        LeaderBook::new(self.replica.lock().await.id, &self.conf)
+    pub(crate) fn new_leaderbook(&self, r_id: ReplicaId) -> LeaderBook {
+        LeaderBook::new(r_id, &self.conf)
     }
 
-    pub(crate) async fn new_ballot(&self) -> Ballot {
-        Ballot::new(self.replica.lock().await.id, &self.conf)
+    pub(crate) fn new_ballot(&self, r_id: ReplicaId) -> Ballot {
+        Ballot::new(r_id, &self.conf)
     }
 
-    pub(crate) async fn handle_message(&self, message: Message<C>)
+    pub(crate) async fn handle_message<T>(&self, message: Message<C>, write_stream: &mut T)
     where
         C: Command + Serialize,
+        T: AsyncWriteExt + Unpin,
     {
         match message {
             Message::PreAccept(pa) => self.handle_preaccept(pa).await,
@@ -127,7 +130,8 @@ where
             Message::AcceptReply(ar) => self.handle_accept_reply(ar).await,
             Message::Commit(cm) => self.handle_commit(cm).await,
             Message::CommitShort(_) => todo!(),
-            Message::Propose(p) => self.handle_propose(p).await,
+            Message::Propose(p) => self.handle_propose(p, write_stream).await,
+            Message::ProposeResponse(_) => unreachable!("This is response from server to client"),
         }
     }
 
@@ -243,7 +247,7 @@ where
                     cmds: vec![],
                     deps: a.deps,
                     status: InstanceStatus::Accepted,
-                    lb: self.new_leaderbook().await,
+                    lb: self.new_leaderbook(r.id),
                 }),
                 None,
             );
@@ -298,11 +302,11 @@ where
                 Some(Instance {
                     id: cm.instance_id,
                     seq: cm.seq,
-                    ballot: self.new_ballot().await,
+                    ballot: self.new_ballot(r.id),
                     cmds: cm.cmds.to_vec(),
                     deps: cm.deps,
                     status: InstanceStatus::Committed,
-                    lb: self.new_leaderbook().await,
+                    lb: self.new_leaderbook(r.id),
                 }),
                 None,
             );
@@ -560,7 +564,7 @@ where
                 // FIXME: Should not copy if we send reply ok later
                 deps: deps.to_vec(),
                 status,
-                lb: self.new_leaderbook().await,
+                lb: self.new_leaderbook(r.id),
             }),
             None,
         );
@@ -611,59 +615,87 @@ where
         }
     }
 
-    async fn handle_propose(&self, p: Propose<C>) {
-        trace!("handle process");
+    async fn handle_propose<T>(&self, p: Propose<C>, write_stream: &mut T)
+    where
+        T: AsyncWriteExt + Unpin,
+    {
+        trace!("handle propose");
         let mut r = self.replica.lock().await;
         let inst_id = *r.local_cur_instance();
         r.inc_local_cur_instance();
         let (seq, deps) = r.get_seq_deps(&p.cmds).await;
 
-        let new_ins = SharedInstance::new(
+        let (tx, rx) = oneshot::channel();
+        let new_ins = SharedInstance::new_execute_complete(
             Some(Instance {
                 id: InstanceId {
                     local: inst_id,
                     replica: r.id,
                 },
                 seq,
-                ballot: self.new_ballot().await,
+                ballot: self.new_ballot(r.id),
                 cmds: p.cmds,
                 deps,
                 status: InstanceStatus::PreAccepted,
-                lb: self.new_leaderbook().await,
+                lb: self.new_leaderbook(r.id),
             }),
             None,
+            crate::types::ResultSender(tx),
         );
 
-        let new_ins_read = new_ins.get_instance_read().await;
-        let new_ins_read_inner = new_ins_read.as_ref().unwrap();
+        {
+            let new_ins_read = new_ins.get_instance_read().await;
+            let new_ins_read_inner = new_ins_read.as_ref().unwrap();
 
-        let r_id = r.id;
-        r.update_conflict(&r_id, &new_ins_read_inner.cmds, new_ins.clone())
+            let r_id = r.id;
+            r.update_conflict(&r_id, &new_ins_read_inner.cmds, new_ins.clone())
+                .await;
+
+            let r_id = r.id;
+            r.instance_space
+                .insert_instance(&r_id, &inst_id, new_ins.clone())
+                .await;
+
+            if seq > r.max_seq {
+                r.max_seq = (*seq + 1).into();
+            }
+            drop(r);
+
+            // TODO: Flush the content to disk
+            self.bdcst_message(
+                r_id,
+                Message::PreAccept(PreAccept {
+                    leader_id: r_id.into(),
+                    instance_id: InstanceId {
+                        replica: r_id,
+                        local: inst_id,
+                    },
+                    seq,
+                    ballot: self.new_ballot(r_id),
+                    // FIXME: should not copy/clone vec
+                    cmds: new_ins_read_inner.cmds.to_vec(),
+                    deps: new_ins_read_inner.deps.to_vec(),
+                }),
+            )
             .await;
-
-        let r_id = r.id;
-        r.instance_space
-            .insert_instance(&r_id, &inst_id, new_ins.clone())
-            .await;
-
-        if seq > r.max_seq {
-            r.max_seq = (*seq + 1).into();
         }
 
-        // TODO: Flush the content to disk
-        self.bdcst_message(
-            r.id,
-            Message::PreAccept(PreAccept {
-                leader_id: r.id.into(),
-                instance_id: InstanceId {
-                    replica: r.id,
-                    local: inst_id,
-                },
-                seq,
-                ballot: self.new_ballot().await,
-                // FIXME: should not copy/clone vec
-                cmds: new_ins_read_inner.cmds.to_vec(),
-                deps: new_ins_read_inner.deps.to_vec(),
+        trace!("waiting for execution");
+
+        let results = rx.await.unwrap();
+        let resp_vec = results
+            .into_iter()
+            .map(|result| match result {
+                Ok(er) => SingleCmdResult::ExecuteResult(er),
+                Err(err) => SingleCmdResult::Error(err.to_string()),
+            })
+            .collect();
+
+        util::send_message(
+            write_stream,
+            &Message::<C>::ProposeResponse(ProposeResponse {
+                cmd_id: p.cmd_id,
+                results: resp_vec,
             }),
         )
         .await;
@@ -773,13 +805,14 @@ where
 
     pub(crate) async fn serve(&self) -> Result<(), RpcError> {
         loop {
-            let (mut stream, _) = self.listener.accept().await?;
+            let (stream, _) = self.listener.accept().await?;
             let server = self.server.clone();
             tokio::spawn(async move {
                 trace!("got a connection");
+                let (mut read_stream, mut write_stream) = tokio::io::split(stream);
                 loop {
-                    let message: Message<C> = util::recv_message(&mut stream).await;
-                    server.handle_message(message).await;
+                    let message: Message<C> = util::recv_message(&mut read_stream).await;
+                    server.handle_message(message, &mut write_stream).await;
                 }
             });
         }

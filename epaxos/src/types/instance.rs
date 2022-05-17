@@ -2,7 +2,11 @@ use std::sync::Arc;
 use std::{fmt::Debug, hash::Hash};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, RwLock, RwLockMappedWriteGuard, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{
+    oneshot, Notify, RwLock, RwLockMappedWriteGuard, RwLockReadGuard, RwLockWriteGuard,
+};
+
+use crate::error::ExecuteError;
 
 use super::{
     cmd::Command,
@@ -35,12 +39,18 @@ where
 }
 
 #[derive(Debug)]
+pub(crate) struct ResultSender<C: Command + Clone>(
+    pub(crate) oneshot::Sender<Vec<Result<C::ER, ExecuteError>>>,
+);
+
+#[derive(Debug)]
 pub(crate) struct SharedInstanceInner<C>
 where
     C: Command + Clone,
 {
     ins: Option<Instance<C>>,
     notify: Option<Vec<Arc<Notify>>>,
+    execute_complete: Option<ResultSender<C>>,
 }
 
 /// Th shared instance stored in the instance space
@@ -85,6 +95,21 @@ where
             inner: Arc::new(RwLock::new(SharedInstanceInner {
                 ins: instance,
                 notify,
+                execute_complete: None,
+            })),
+        }
+    }
+
+    pub(crate) fn new_execute_complete(
+        instance: Option<Instance<C>>,
+        notify: Option<Vec<Arc<Notify>>>,
+        execute_complete: ResultSender<C>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(SharedInstanceInner {
+                ins: instance,
+                notify,
+                execute_complete: Some(execute_complete),
             })),
         }
     }
@@ -141,6 +166,14 @@ where
         }
         drop(notify_vec);
         self.clear_notify().await;
+    }
+
+    pub(crate) async fn notify_execute(&self, exe_result: Vec<Result<C::ER, ExecuteError>>) {
+        let mut inner = self.inner.write().await;
+        if inner.execute_complete.is_some() {
+            let chan = inner.execute_complete.take();
+            chan.map(|chan| chan.0.send(exe_result));
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
 
 use crate::error::ExecuteError;
 use std::hash::Hash;
@@ -13,9 +14,12 @@ pub trait Command: Sized {
     /// K is used to tell confliction
     type K: Eq + Hash + Send + Sync + Clone + 'static;
 
+    /// Execution result
+    type ER: std::fmt::Debug + Send + serde::Serialize + DeserializeOwned + Sync + Clone;
+
     fn key(&self) -> &Self::K;
 
-    async fn execute<E>(&self, e: &E) -> Result<(), ExecuteError>
+    async fn execute<E>(&self, e: &E) -> Result<Self::ER, ExecuteError>
     where
         E: CommandExecutor<Self> + Send + Sync,
     {
@@ -28,11 +32,11 @@ pub trait CommandExecutor<C>
 where
     C: Command,
 {
-    async fn execute(&self, cmd: &C) -> Result<(), ExecuteError>;
+    async fn execute(&self, cmd: &C) -> Result<C::ER, ExecuteError>;
 }
 
 #[cfg(test)]
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MockCommandId {
     instance_id: InstanceId,
     cmd_id: usize,
@@ -49,7 +53,7 @@ impl MockCommandId {
 }
 
 #[cfg(test)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MockCommand {
     key: String,
     value: MockCommandId,
@@ -72,6 +76,7 @@ impl MockCommand {
 #[async_trait]
 impl Command for MockCommand {
     type K = String;
+    type ER = String;
 
     fn key(&self) -> &Self::K {
         &self.key
@@ -94,10 +99,10 @@ impl MockCommandExecutor {
 #[cfg(test)]
 #[async_trait]
 impl CommandExecutor<MockCommand> for MockCommandExecutor {
-    async fn execute(&self, cmd: &MockCommand) -> Result<(), ExecuteError> {
+    async fn execute(&self, cmd: &MockCommand) -> Result<String, ExecuteError> {
         if self.cmd_sender.is_some() {
             let _ = self.cmd_sender.as_ref().unwrap().send(cmd.value()).await;
         }
-        Ok(())
+        Ok(String::new())
     }
 }

@@ -234,18 +234,22 @@ where
             });
 
             for (id, _) in sort_vec {
+                let mut results = vec![];
                 let ins = &g[each_scc[id]];
-                let mut ins_write = ins.get_instance_write().await;
-                let ins_write = ins_write.as_mut().unwrap();
+                {
+                    let mut ins_write = ins.get_instance_write().await;
+                    let ins_write = ins_write.as_mut().unwrap();
 
-                // It may be executed by other execution tasks
-                if matches!(ins_write.status, InstanceStatus::Committed) {
-                    for c in &ins_write.cmds {
-                        // FIXME: handle execute error
-                        let _ = c.execute(&self.cmd_exe).await;
+                    // It may be executed by other execution tasks
+                    if matches!(ins_write.status, InstanceStatus::Committed) {
+                        for c in &ins_write.cmds {
+                            let exe_result = c.execute(&self.cmd_exe).await;
+                            results.push(exe_result);
+                        }
+                        ins_write.status = InstanceStatus::Executed;
                     }
-                    ins_write.status = InstanceStatus::Executed;
                 }
+                ins.notify_execute(results).await;
             }
         }
     }

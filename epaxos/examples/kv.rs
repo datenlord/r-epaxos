@@ -27,6 +27,7 @@ struct TestCommand {
 #[async_trait::async_trait]
 impl Command for TestCommand {
     type K = String;
+    type ER = String;
 
     fn key(&self) -> &Self::K {
         &self.key
@@ -38,9 +39,9 @@ struct TestCommandExecutor {}
 
 #[async_trait::async_trait]
 impl CommandExecutor<TestCommand> for TestCommandExecutor {
-    async fn execute(&self, cmd: &TestCommand) -> Result<(), error::ExecuteError> {
+    async fn execute(&self, cmd: &TestCommand) -> Result<String, error::ExecuteError> {
         info!("execute command {:?}", cmd);
-        Ok(())
+        Ok(cmd.value.as_ref().map_or(String::new(), |v| v.to_owned()))
     }
 }
 
@@ -72,7 +73,7 @@ async fn main() -> io::Result<()> {
     debug!("spawn servers");
 
     let mut client = TcpRpcClient::<TestCommand>::new(Configure::new(3, peer, 0, 0), 0).await;
-    client
+    let write_result = client
         .propose(vec![TestCommand {
             key: "k1".to_owned(),
             value: Some("v1".to_owned()),
@@ -80,6 +81,7 @@ async fn main() -> io::Result<()> {
         }])
         .await;
 
+    debug!("write result is {:?}", write_result);
     debug!("after client propose");
     // The server will never end until someone kills is
     for h in handles {
