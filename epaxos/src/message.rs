@@ -72,7 +72,26 @@ pub(crate) struct Propose<C>
 where
     C: Command + Serialize,
 {
+    pub(crate) cmd_id: String,
     pub(crate) cmds: Vec<C>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum SingleCmdResult<C>
+where
+    C: Command + Serialize,
+{
+    ExecuteResult(C::ER),
+    Error(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProposeResponse<C>
+where
+    C: Command + Serialize,
+{
+    pub(crate) cmd_id: String,
+    pub(crate) results: Vec<SingleCmdResult<C>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,4 +107,5 @@ where
     Commit(Commit<C>),
     CommitShort(CommitShort),
     Propose(Propose<C>),
+    ProposeResponse(ProposeResponse<C>),
 }

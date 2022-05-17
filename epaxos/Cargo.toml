@@ -18,4 +18,5 @@ pro-macro = {path = "../pro-macro"}
 serde = {version = "1.0.130", features = ["derive"]}
 thiserror = "1.0.30"
 tokio = {version = "1.14", features = ["net", "rt", "io-util", "sync", "macros", "rt-multi-thread", "time"]}
+uuid = {version = "1.0.0", features = ["v4"]}
 yaml-rust = "0.4.5"

@@ -9,9 +9,10 @@ use tokio::{
 
 use crate::types::{Command, SharedInstance};
 
-pub(crate) async fn send_message<M>(conn: &mut TcpStream, message: &M)
+pub(crate) async fn send_message<M, T>(conn: &mut T, message: &M)
 where
     M: Serialize,
+    T: AsyncWriteExt + Unpin,
 {
     // TODO: Report message content while meeting error
     let content = bincode::serialize(message)
@@ -41,9 +42,10 @@ where
     send_message_arc(conn, message.as_ref()).await;
 }
 
-pub(crate) async fn recv_message<M>(conn: &mut TcpStream) -> M
+pub(crate) async fn recv_message<M, T>(conn: &mut T) -> M
 where
     M: DeserializeOwned,
+    T: AsyncReadExt + Unpin,
 {
     let mut len_buf: [u8; 8] = [0; 8];
 
@@ -61,7 +63,10 @@ where
         .unwrap()
 }
 
-async fn read_from_stream(stream: &mut TcpStream, buf: &mut [u8]) {
+async fn read_from_stream<T>(stream: &mut T, buf: &mut [u8])
+where
+    T: AsyncReadExt + Unpin,
+{
     let expect_len = buf.len();
     let mut has_read: usize = 0;
     while has_read != expect_len {

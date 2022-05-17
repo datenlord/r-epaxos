@@ -1,7 +1,7 @@
 pub use self::cmd::{Command, CommandExecutor};
 pub(crate) use self::{
     id::{Ballot, InstanceId, LeaderId, LocalInstanceId, ReplicaId, Seq},
-    instance::{Instance, InstanceStatus, SharedInstance},
+    instance::{Instance, InstanceStatus, ResultSender, SharedInstance},
     lb::LeaderBook,
     replica::Replica,
     space::{InstanceSpace, VecInstanceSpace},
