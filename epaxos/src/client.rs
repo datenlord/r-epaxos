@@ -14,7 +14,7 @@ use crate::{
 use async_trait::async_trait;
 use log::trace;
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::{io::WriteHalf, net::TcpStream, sync::oneshot};
+use tokio::{io::WriteHalf, net::TcpStream, sync::oneshot, task::JoinHandle};
 
 #[async_trait]
 pub trait RpcClient<C>
@@ -37,6 +37,7 @@ where
     stream: WriteHalf<TcpStream>,
     phantom: PhantomData<C>,
     req_map: Arc<Mutex<HashMap<String, ResultSender<C>>>>,
+    handle: JoinHandle<()>,
 }
 
 impl<C> TcpRpcClient<C>
@@ -72,9 +73,9 @@ where
             Arc::new(Mutex::new(HashMap::new()));
         let req_map_clone = req_map.clone();
         let (mut read_stream, write_stream) = tokio::io::split(stream);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
-                let response: Message<C> = util::recv_message(&mut read_stream).await;
+                let response: Message<C> = util::recv_message(&mut read_stream).await.unwrap_or_else(||panic!("Failed to receive mesasge from server because server has closed connection"));
                 if let Message::ProposeResponse(pr) = response {
                     let mut locked_map = req_map_clone.lock().unwrap();
                     let tx = locked_map.remove(&pr.cmd_id);
@@ -97,7 +98,17 @@ where
             stream: write_stream,
             phantom: PhantomData,
             req_map,
+            handle,
         }
+    }
+}
+
+impl<C> Drop for TcpRpcClient<C>
+where
+    C: Command,
+{
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
