@@ -12,7 +12,7 @@ use crate::{
     util::{self, instance_exist},
 };
 use futures::stream::{self, StreamExt};
-use log::trace;
+use log::{debug, trace};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -811,8 +811,14 @@ where
                 trace!("got a connection");
                 let (mut read_stream, mut write_stream) = tokio::io::split(stream);
                 loop {
-                    let message: Message<C> = util::recv_message(&mut read_stream).await;
-                    server.handle_message(message, &mut write_stream).await;
+                    let message_opt: Option<Message<C>> =
+                        util::recv_message(&mut read_stream).await;
+                    if let Some(message) = message_opt {
+                        server.handle_message(message, &mut write_stream).await;
+                    } else {
+                        debug!("Failed to receive message because peer has closed");
+                        break;
+                    }
                 }
             });
         }

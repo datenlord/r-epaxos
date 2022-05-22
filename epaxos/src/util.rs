@@ -42,28 +42,34 @@ where
     send_message_arc(conn, message.as_ref()).await;
 }
 
-pub(crate) async fn recv_message<M, T>(conn: &mut T) -> M
+pub(crate) async fn recv_message<M, T>(conn: &mut T) -> Option<M>
 where
     M: DeserializeOwned,
     T: AsyncReadExt + Unpin,
 {
     let mut len_buf: [u8; 8] = [0; 8];
 
-    read_from_stream(conn, &mut len_buf).await;
+    let read_size = read_from_stream(conn, &mut len_buf).await;
+    if read_size != 8 {
+        return None;
+    }
 
     let expected_len = u64::from_be_bytes(len_buf);
-    let mut buf: Vec<u8> = Vec::with_capacity(expected_len as usize);
-    // We've set capacity and check the content length
-    unsafe { buf.set_len(expected_len as usize) };
+    let mut buf: Vec<u8> = vec![0; expected_len as usize];
 
-    read_from_stream(conn, &mut buf).await;
+    let read_size = read_from_stream(conn, &mut buf).await;
+    if read_size != expected_len as usize {
+        return None;
+    }
 
-    bincode::deserialize(&buf)
-        .map_err(|e| panic!("Deserialize message failed, {} ", e))
-        .unwrap()
+    Some(
+        bincode::deserialize(&buf)
+            .map_err(|e| panic!("Deserialize message failed, {} ", e))
+            .unwrap(),
+    )
 }
 
-async fn read_from_stream<T>(stream: &mut T, buf: &mut [u8])
+async fn read_from_stream<T>(stream: &mut T, buf: &mut [u8]) -> usize
 where
     T: AsyncReadExt + Unpin,
 {
@@ -73,11 +79,16 @@ where
         let read_size = stream
             .read(&mut buf[has_read..])
             .await
-            .map_err(|e| panic!("tpc link should read {} bytes message, {}", expect_len, e))
+            .map_err(|e| panic!("tcp link should read {} bytes message, {}", expect_len, e))
             .unwrap();
+        // peer has closed
+        if read_size == 0 {
+            break;
+        }
 
         has_read += read_size;
     }
+    has_read
 }
 
 pub(crate) async fn instance_exist<C>(ins: &Option<SharedInstance<C>>) -> bool

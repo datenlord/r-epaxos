@@ -23,6 +23,10 @@ impl Configure {
             epoch,
         }
     }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
 }
 
 impl Index<usize> for Configure {
